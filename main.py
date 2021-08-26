@@ -38,13 +38,13 @@ def compare(snapshots):
     postchange = snapshots["postchange"]
     updated_values = {}
     #loops through keys and non-matching values
-    try:
-        for key in prechange:
-            if prechange[key] != postchange[key]:
-                updated_values[key] = postchange[key]
-        return updated_values
-    except TypeError:
-        print("The prechange was empty")
+    #try:
+    for key in prechange:
+        if prechange[key] != postchange[key]:
+            updated_values[key] = postchange[key]
+    return updated_values
+    #except TypeError:
+    #    print("The prechange was empty")
 
 
 #returns the configurable values
@@ -78,9 +78,12 @@ def get_api_data(config):
                 'Authorization': "Token c788f875f6a0bce55f485051a61dbb67edba0994" 
                 }
 
-    r = requests.get("GET", url, headers=headers)                       
+    api_data = requests.request("GET", url, headers=headers, verify=False)
+    #ip = api_data["primary_ip"]
 
-    print(json.dumps(r.json(), indent=4))
+    print(json.dumps(api_data.json(), indent=4))
+    #print(ip)
+    #return ip
 
 
 @app.route('/webhook-test', methods=['POST'])
@@ -103,7 +106,12 @@ def respond():
 
     #step 2: check event
     if event == "updated":
-        values = compare(webhook["snapshots"])
+        if webhook["snapshots"]["prechange"] == None:
+            print("POST OR PRECHANGE WAS EMPTY BIATCH. now exits")
+            return Response(status=200)
+        
+        else:
+            values = compare(webhook["snapshots"])
 
     elif event == "created":
         values = webhook["snapshots"]["postchange"]
@@ -112,13 +120,11 @@ def respond():
         values = webhook["snapshots"]["prechange"]
 
     #step 3: get configurable values and api url if more info needed  
-    if "values" in locals():
-        print(values)
-        config = pick_out_values(model, data, values)
+    print(values)
+    config = pick_out_values(model, data, values)
 
     #step 4: api get request for more info (if needed)
     if "informational" in config:
         info = get_api_data(config)
-
 
     return Response(status=200)
