@@ -1,6 +1,7 @@
 from flask import Flask, request, Response
 import json
 import requests
+from datetime import datetime
 
 
 app = Flask(__name__)
@@ -24,6 +25,7 @@ list_of_models =    {
                     }
 
 
+
 #check if model is configurable. Returns model, event, data if so
 def check_model(model):
     if model in list_of_models:
@@ -38,13 +40,10 @@ def compare(snapshots):
     postchange = snapshots["postchange"]
     updated_values = {}
     #loops through keys and non-matching values
-    #try:
     for key in prechange:
         if prechange[key] != postchange[key]:
             updated_values[key] = postchange[key]
     return updated_values
-    #except TypeError:
-    #    print("The prechange was empty")
 
 
 #returns the configurable values
@@ -64,6 +63,8 @@ def pick_out_values(model, data, values):
         for i in range(0, length):                                      #loop på antalet element i info
             if i == 0:                                                      #första varvet:
                 config["informational"] = data[info[i]]                           #uppslagning i data, efter element 0 från info. Sparar värdet i conf under nyckeln ["informational"]
+                if config["informational"] == None:                                 #if assigned_objects är null, tex ipaddress är inte assigned till en enhet
+                    return                                                        #avslutar funktionen, return None
             else:                                                           #alla andra varv:
                 config["informational"] = config["informational"][info[i]]          #uppslagning i conf["informational"], efter nästa element i info. Sparar över i conf. Upprepar för resterande element.
     print("slutresultat: ", config)
@@ -79,18 +80,42 @@ def get_api_data(config):
                 }
 
     api_data = requests.request("GET", url, headers=headers, verify=False)
-    #ip = api_data["primary_ip"]
+    api_data = api_data.json()
 
-    print(json.dumps(api_data.json(), indent=4))
-    #print(ip)
-    #return ip
+    print(json.dumps(api_data, indent=4))
+    
+    if api_data["primary_ip"] != None:
+        ip = api_data["primary_ip"]["address"]
+        device_name = api_data["name"]
+        return ip, device_name
+    else:
+        return
 
 
+def create_playbook(config, ip, device_name):
+    dateTimeObj = datetime.now()
+    date = (f"{dateTimeObj.year}-{dateTimeObj.month}-{dateTimeObj.day}")
+    time = (f"{dateTimeObj.hour}-{dateTimeObj.minute}-{dateTimeObj.second}")
+
+    fil = open(f"{device_name}_{date}_{time}.yaml", "x")
+    fil.write("hej")
+    fil.close()
+    return
+
+"""
+Below is the flask app code that receives the webhook.
+Calls the functions responsible for each step.
+If a function returns a value of None, the webhook wont be processed futher.
+In the code this is represented as a "return Response(=200)", which is a
+HTTP response to the HTTP webhook POST. Functions and
+terms are further explained in conjunction with the functions,
+the comments beside the code only serves the purpose to explain the code as is.
+"""
 @app.route('/webhook-test', methods=['POST'])
 def respond():
-    webhook = request.json
-    model = webhook["model"]
-    data = webhook["data"] 
+    webhook = request.json                                                              #the variable "webhook" is created containing the incoming webhook data in a json dictionary
+    model = webhook["model"]                                                            #a lookup in the dictionary is made and the data saved in a variable
+    data = webhook["data"]
 
     print(json.dumps(webhook, indent=4))
 
@@ -107,7 +132,10 @@ def respond():
     #step 2: check event
     if event == "updated":
         if webhook["snapshots"]["prechange"] == None:
-            print("POST OR PRECHANGE WAS EMPTY BIATCH. now exits")
+            print()
+            print("prechange contains a value of null.")
+            print("This occurs when the 'make this the primary IP for the device' option was changed when creating/editing an ipaddress")
+            print("which will send a device webhook as well, with the prechange set to null")
             return Response(status=200)
         
         else:
@@ -122,9 +150,22 @@ def respond():
     #step 3: get configurable values and api url if more info needed  
     print(values)
     config = pick_out_values(model, data, values)
+    if config == None:
+        print()
+        print("assigned_objects contains a value of null. This occurs when a webhook is triggered for an ipaddress which has not been assigned to a device")
+        print("no configuration needed, because the change doesnt relate to a device.")
+        return Response(status=200)
 
     #step 4: api get request for more info (if needed)
     if "informational" in config:
-        info = get_api_data(config)
+        ip, device_name = get_api_data(config)
+        print("device primary IP is", ip)
+        if ip == None:
+            print()
+            print("The targeted device has no primary IP assigned. Nowhere to send conf.")
+            return Response(status=200)
+
+    #step 5: playbook
+    create_playbook(config, ip, device_name)
 
     return Response(status=200)
