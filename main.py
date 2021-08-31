@@ -1,8 +1,9 @@
-from flask import Flask, request, Response
-import json
-import requests
-from datetime import datetime
-
+from flask import Flask, request, Response      #used for flask app, receive and response of webhook
+import json                                     #used for handling json objects
+import requests                                 #used for HTTP get request to netbox api
+from datetime import datetime                   #used for playbook file timestamp
+import os                                       #used for directory making
+import getpass
 
 app = Flask(__name__)
 
@@ -10,7 +11,8 @@ app = Flask(__name__)
 list_of_models =    {
                     "device": 
                                 {
-                                    "configurable": ["name"]
+                                    "configurable": ["name"],
+                                    "informational": ["primary_ip", "address"]
                                 },
                     "interface":
                                 {
@@ -47,6 +49,10 @@ def compare(snapshots):
 
 
 #returns the configurable values
+"""
+returns 'config' as a dict with both "configurable" and "informational" as keys
+or returns a value of None
+"""
 def pick_out_values(model, data, values):
     config = {}
     for element in list_of_models[model]["configurable"]:
@@ -54,8 +60,9 @@ def pick_out_values(model, data, values):
             config["configurable"] = {}
             #Key is added in the dictionary "config" along with a value
             config["configurable"][element] = values[element]
+    
 
-    if not model == "device":
+    if "configurable" in config == True:
         config["informational"] = {}
         info = list_of_models[model]["informational"]
         length = len(info)
@@ -64,11 +71,11 @@ def pick_out_values(model, data, values):
             if i == 0:                                                      #första varvet:
                 config["informational"] = data[info[i]]                           #uppslagning i data, efter element 0 från info. Sparar värdet i conf under nyckeln ["informational"]
                 if config["informational"] == None:                                 #if assigned_objects är null, tex ipaddress är inte assigned till en enhet
-                    return                                                        #avslutar funktionen, return None
+                    return None                                                         #avslutar funktionen, return None
             else:                                                           #alla andra varv:
                 config["informational"] = config["informational"][info[i]]          #uppslagning i conf["informational"], efter nästa element i info. Sparar över i conf. Upprepar för resterande element.
-    print("slutresultat: ", config)
-    return config
+        return config
+    return None
 
 
 def get_api_data(config):
@@ -93,11 +100,24 @@ def get_api_data(config):
 
 
 def create_playbook(config, ip, device_name):
+    #timestamp
     dateTimeObj = datetime.now()
     date = (f"{dateTimeObj.year}-{dateTimeObj.month}-{dateTimeObj.day}")
     time = (f"{dateTimeObj.hour}-{dateTimeObj.minute}-{dateTimeObj.second}")
+    
+    #mkdir
+    username = getpass.getuser()
+    path = "/home/"+username+"/playbooks/"+date
+    print(path)
 
-    fil = open(f"{device_name}_{date}_{time}.yaml", "x")
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print("Directory", path, "created")
+    else:
+        print("Directory", path, "already exists")
+
+    #mk file
+    fil = open(f"{path}/{device_name}_{date}_{time}.yaml", "x")
     fil.write("hej")
     fil.close()
     return
@@ -150,14 +170,21 @@ def respond():
     #step 3: get configurable values and api url if more info needed  
     print(values)
     config = pick_out_values(model, data, values)
+    print("slutresultat: ", config)
+
     if config == None:
         print()
+        print("config == None. No configurable values were returned from the 'pick_out_values' function, or")
         print("assigned_objects contains a value of null. This occurs when a webhook is triggered for an ipaddress which has not been assigned to a device")
         print("no configuration needed, because the change doesnt relate to a device.")
         return Response(status=200)
 
-    #step 4: api get request for more info (if needed)
-    if "informational" in config:
+    #step 4: api get request for target IP address & device name (included in the webhook for device model)
+    if model == "device":
+        ip = config["informational"]
+        device_name = config["configurable"]
+
+    else:
         ip, device_name = get_api_data(config)
         print("device primary IP is", ip)
         if ip == None:
