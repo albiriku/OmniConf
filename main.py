@@ -50,8 +50,19 @@ class ResultsCollectorJSONCallback(CallbackBase):
         self.host_failed[host.get_name()] = result
 
 
-def run_playbook(config, ip, event, model):
-    host_list = ['131.226.217.143'] 
+def run_playbook(config, ip, event, model, data, values):
+    #removes the mask from ip
+    if ip[-2] == '/':
+        #removes the last 2 
+        ip = ip[:-2]
+    elif ip[-3] == '/':
+        #removes the last 3
+        ip = ip[:-3]
+    else:
+        #removes the last 4, if mask is 3 digits (ipv6)
+        ip = ip[:-4]
+
+    host_list = [ip] 
     # since the API is constructed for CLI it expects certain options to always be set in the context object
     context.CLIARGS = ImmutableDict(connection='smart', module_path=['/home/albiriku/devnet/dne-dna-code/venv-flask/lib/python3.8/site-packages/ansible/modules'], forks=10, verbosity=True, check=False, diff=False)
 
@@ -90,21 +101,78 @@ def run_playbook(config, ip, event, model):
     )
 
     # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
-    config = {"ietf-interfaces:interface":{"name": "Loopback104","description": "Added with RESTCONF","type": "iana-if-type:softwareLoopback","enabled": True,"ietf-ip:ipv4":{"address":[{"ip": "172.16.100.10","netmask": "255.255.255.0"}]}}}
+    
+
+    if model == 'interface':
+        name = data['name']
+        if event == 'created':
+            if values['type'] == 'virtual':
+                int_type = 'softwareLoopback'
+            else:
+                int_type = 'ethernetCsmacd'
+            payload = {"ietf-interfaces:interface":{ "name": values['name'],
+                                                     "description": values['description'],
+                                                     "type": f"iana-if-type:{int_type}",
+                                                     "enabled": values['enabled']
+                                                   }
+                      }
+            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json.dumps(payload), method='post')))
+
+        elif event == 'updated':
+            payload = {"ietf-interfaces:interface:":config['configurable']}
+            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))
+        
+        else:
+            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', method='delete')))
+
+
+
+    ################
+    """
+    if event == 'created':
+        event = 'post'
+    elif event == 'updated':
+        event = 'patch'
+    elif event == 'deleted':
+        event = 'delete'
+
+    if model == 'interface':
+        path = '/data/ietf-interfaces:interfaces'
+        payload = 'ietf-interfaces:interface'
+        target = f'/interface={config[name]}'
+    elif model == 'device':
+        path = '/data/ietf-devices:devices'
+        payload = 'ietf-devices:device'
+        target = f'/device={config[name]}'
+    elif model == 'ipaddress':
+        path = '/data/ietf-ipaddresses:ipaddresses'
+        payload = 'ietf-ipaddresses:ipaddress'
+        target = f'/ipaddress={config[name]}'
+
+    if event == 'post':
+        task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path={path}, content=json_object, method={event})))
+    else:
+        task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path={path + target}, content=json_object, method={event})))
+
+    config = {payload:}
+
+    config = {"ietf-interfaces:interface":{"name": "Loopback104","description": "Added with RESTCONF v2","type": "iana-if-type:softwareLoopback","enabled": True,"ietf-ip:ipv4":{"address":[{"ip": "172.16.100.10","netmask": "255.255.255.0"}]}}}
 
     config_put = {"ietf-interfaces:interface:":{"name": "Loopback104","description": "PUT with RESTCONF - YES", "type": "iana-if-type:softwareLoopback","type": "iana-if-type:softwareLoopback","enabled": False,"ietf-ip:ipv4":{"address":[{"ip": "172.16.100.69","netmask": "255.255.255.0"}]}}}
 
-    config_patch = {"ietf-interfaces:interface:":{"enabled": True}}
+    config_patch = {"ietf-interfaces:interface:":{"enabled": False}}
 
     json_object = json.dumps(config, indent = 4)
     print(json_object)
+    """
 
     play_source = dict(
-        name="Ansible Play",
-        hosts=host_list,
-        gather_facts='no',
-        tasks=[
-            dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json_object, method='post')))
+    name="Ansible Play",
+    hosts=host_list,
+    gather_facts='no',
+    tasks=[task]
+
+            #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json_object, method='post')))
             #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces/interface=Loopback104', content=json_object, method='put')))
             #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces/interface=Loopback104', content=json_object, method='patch')))
             #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces/interface=Loopback104', method='delete')))
@@ -115,7 +183,6 @@ def run_playbook(config, ip, event, model):
             #dict(action=dict(module='shell', args='ls'), register='shell_out'),
             #dict(action=dict(module='debug', args=dict(msg='{{shell_out.stdout}}'))),
             #dict(action=dict(module='command', args=dict(cmd='/usr/bin/uptime'))),
-        ]
     )
 
 
@@ -169,7 +236,7 @@ list_of_models =    {
                                 },
                     "interface":
                                 {
-                                    "configurable": ["enabled"],
+                                    "configurable": ["enabled", "description"],
                                     "informational": ["device", "url"]
                                 },
                     "ipaddress":
@@ -208,15 +275,15 @@ or returns a value of None
 """
 def pick_out_values(model, data, values):
     config = {}
+    config["configurable"] = {}
 
     for element in list_of_models[model]["configurable"]:
         if element in values:
-            config["configurable"] = {}
             #Key is added in the dictionary "config" along with a value
             config["configurable"][element] = values[element]
     
     print('1',config)
-    if "configurable" in config != None:
+    if "configurable" in config != {}:
         config["informational"] = {}
         info = list_of_models[model]["informational"]
         length = len(info)
@@ -349,7 +416,7 @@ def respond():
             print("The targeted device has no primary IP assigned. Nowhere to send conf.")
             return Response(status=200)
 
-    #step 5: playbook
-    run_playbook(config, ip, event, model) #device_name
+    #step 5: create and run playbook
+    run_playbook(config, ip, event, model, data, values) #device_name
 
     return Response(status=200)
