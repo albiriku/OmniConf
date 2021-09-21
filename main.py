@@ -99,10 +99,9 @@ def run_playbook(config, ip, event, model, data, values):
         passwords=passwords,
         stdout_callback=results_callback,  # Use our custom callback instead of the ``default`` callback plugin, which prints to stdout
     )
-
-    # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
     
-
+    # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
+    # interface configuration
     if model == 'interface':
         name = data['name']
         if event == 'created':
@@ -122,8 +121,61 @@ def run_playbook(config, ip, event, model, data, values):
             payload = {"ietf-interfaces:interface:":config['configurable']}
             task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))
         
-        else:
+        elif event == 'deleted':
             task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', method='delete')))
+
+    # ipaddress configuration
+    if model == 'ipaddress':
+        name = data['assigned_object']['name']
+        family = data['family']['label'].lower()
+        address = config['configurable']['address']
+
+        #seperate prefix and address from each other
+        #needed for payload format
+        if address[-2] == '/':
+            #prefix is 1 digit
+            prefix = address[-1:] 
+            address = address[:-2]
+        elif address[-3] == '/':
+            #prefix is 2 digits
+            prefix = address[-2:]
+            address = address[:-3]
+        else:
+            #for ipv6 only, when prefix is 3 digits
+            prefix = address[-3:]
+            address = address[:-4]
+
+        if family == 'ipv4':
+            # only needed for IPv4, converts prefix to netmask format
+            # reference:
+            # https://stackoverflow.com/questions/23352028/how-to-convert-a-cidr-prefix-to-a-dotted-quad-netmask-in-python
+            prefix = '.'.join([str((m>>(3-i)*8)&0xff) for i,m in enumerate([-1<<(32-int(prefix))]*4)])
+            mask = 'netmask'
+
+        elif family == 'ipv6':
+            mask = 'prefix-length'
+        
+        # payload & task for IPv4 & IPv6
+        if event == 'created':
+            payload = { 
+                        "ietf-ip:address": [ 
+                            { 
+                            "ip": f"{address}", 
+                           f"{mask}": f"{prefix}" 
+                            } 
+                        ] 
+                    }          
+            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', content=json.dumps(payload), method='patch')))
+
+        #elif event == 'updated':
+
+        elif event == 'deleted':
+            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={address}', method='delete')))
+            
+        
+
+        
+
 
 
 
@@ -166,6 +218,8 @@ def run_playbook(config, ip, event, model, data, values):
     print(json_object)
     """
 
+    # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
+    # generates and runs the playbook with the task given above
     play_source = dict(
     name="Ansible Play",
     hosts=host_list,
@@ -204,7 +258,10 @@ def run_playbook(config, ip, event, model, data, values):
 
     print("UP ***********")
     for host, result in results_callback.host_ok.items():
-        print('{0} >>> {1}'.format(host, result._result['candidate'])) #candidate
+        if event == 'deleted':
+            print('{0} >>> {1} \n{2}'.format(host, result._result['changed'], result._result['invocation']))
+        else:
+            print('{0} >>> {1}'.format(host, result._result['candidate']))
 
     print("FAILED *******")
     for host, result in results_callback.host_failed.items():
@@ -283,7 +340,7 @@ def pick_out_values(model, data, values):
             config["configurable"][element] = values[element]
     
     print('1',config)
-    if "configurable" in config != {}:
+    if config["configurable"] != {}:
         config["informational"] = {}
         info = list_of_models[model]["informational"]
         length = len(info)
