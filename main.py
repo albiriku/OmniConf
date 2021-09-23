@@ -49,8 +49,31 @@ class ResultsCollectorJSONCallback(CallbackBase):
         host = result._host
         self.host_failed[host.get_name()] = result
 
+#separates prefix and address from each other
+#returns both or only address depending on parameters given  
+def split_address(address, mask=False):
+    if address[-2] == '/':
+        #prefix is 1 digit
+        prefix = address[-1:]
+        address = address[:-2]
+    elif address[-3] == '/':
+        #prefix is 2 digits
+        prefix = address[-2:]
+        address = address[:-3]
+    else:
+        #for ipv6 only, when prefix is 3 digits
+        prefix = address[-3:]
+        address = address[:-4]
+    if mask == False:
+        return address
+    else:
+        return address, prefix
 
-def run_playbook(config, ip, event, model, data, values):
+def run_playbook(config, ip, event, model, data, values, snapshots):
+    #remove mask from ip
+    host  = split_address(ip)
+
+    """
     #removes the mask from ip
     if ip[-2] == '/':
         #removes the last 2 
@@ -61,8 +84,8 @@ def run_playbook(config, ip, event, model, data, values):
     else:
         #removes the last 4, if mask is 3 digits (ipv6)
         ip = ip[:-4]
-
-    host_list = [ip] 
+    """
+    host_list = [host] 
     # since the API is constructed for CLI it expects certain options to always be set in the context object
     context.CLIARGS = ImmutableDict(connection='smart', module_path=['/home/albiriku/devnet/dne-dna-code/venv-flask/lib/python3.8/site-packages/ansible/modules'], forks=10, verbosity=True, check=False, diff=False)
 
@@ -104,25 +127,21 @@ def run_playbook(config, ip, event, model, data, values):
     # interface configuration
     if model == 'interface':
         name = data['name']
+        if config['configurable']['type'] == 'virtual':
+            config['configurable']['type'] = 'softwareLoopback'
+        else:
+            config['configurable']['type'] = 'ethernetCsmacd'
+
         if event == 'created':
-            if values['type'] == 'virtual':
-                int_type = 'softwareLoopback'
-            else:
-                int_type = 'ethernetCsmacd'
-            payload = {"ietf-interfaces:interface":{ "name": values['name'],
-                                                     "description": values['description'],
-                                                     "type": f"iana-if-type:{int_type}",
-                                                     "enabled": values['enabled']
-                                                   }
-                      }
-            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json.dumps(payload), method='post')))
+            payload = {"ietf-interfaces:interface":config['configurable']} 
+            task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json.dumps(payload), method='post')))]
 
         elif event == 'updated':
             payload = {"ietf-interfaces:interface:":config['configurable']}
-            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))
+            task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))]
         
         elif event == 'deleted':
-            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', method='delete')))
+            task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', method='delete')))]
 
     # ipaddress configuration
     if model == 'ipaddress':
@@ -130,12 +149,14 @@ def run_playbook(config, ip, event, model, data, values):
         family = data['family']['label'].lower()
         address = config['configurable']['address']
 
-        #seperate prefix and address from each other
         #needed for payload format
+        address, prefix = split_address(address, True)
+        """
         if address[-2] == '/':
             #prefix is 1 digit
             prefix = address[-1:] 
             address = address[:-2]
+            old_address
         elif address[-3] == '/':
             #prefix is 2 digits
             prefix = address[-2:]
@@ -144,6 +165,7 @@ def run_playbook(config, ip, event, model, data, values):
             #for ipv6 only, when prefix is 3 digits
             prefix = address[-3:]
             address = address[:-4]
+        """
 
         if family == 'ipv4':
             # only needed for IPv4, converts prefix to netmask format
@@ -156,21 +178,33 @@ def run_playbook(config, ip, event, model, data, values):
             mask = 'prefix-length'
         
         # payload & task for IPv4 & IPv6
-        if event == 'created':
+        if event == 'created' or event == 'updated':
             payload = { 
                         "ietf-ip:address": [ 
                             { 
-                            "ip": f"{address}", 
-                           f"{mask}": f"{prefix}" 
+                            "ip": address, 
+                            mask: prefix 
                             } 
                         ] 
-                    }          
-            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', content=json.dumps(payload), method='patch')))
+                    }
 
-        #elif event == 'updated':
+            print(payload)
+            if event == 'created':
+                task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', 
+                        content=json.dumps(payload), method='patch')))]
+     
+            elif event == 'updated':
+                # the target object on the device
+                old_address = split_address(snapshots['prechange']['address'])
+
+                #first deletes the old address then adds the new
+                task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={old_address}', 
+                        method='delete'))),
+                        dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', 
+                        content=json.dumps(payload), method='patch')))]
 
         elif event == 'deleted':
-            task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={address}', method='delete')))
+            task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={address}', method='delete')))]
             
         
 
@@ -224,7 +258,7 @@ def run_playbook(config, ip, event, model, data, values):
     name="Ansible Play",
     hosts=host_list,
     gather_facts='no',
-    tasks=[task]
+    tasks=task
 
             #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json_object, method='post')))
             #dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces/interface=Loopback104', content=json_object, method='put')))
@@ -258,7 +292,8 @@ def run_playbook(config, ip, event, model, data, values):
 
     print("UP ***********")
     for host, result in results_callback.host_ok.items():
-        if event == 'deleted':
+        #if result._result['candidate'] == None:
+        if not 'candidate' in result._result:
             print('{0} >>> {1} \n{2}'.format(host, result._result['changed'], result._result['invocation']))
         else:
             print('{0} >>> {1}'.format(host, result._result['candidate']))
@@ -293,7 +328,7 @@ list_of_models =    {
                                 },
                     "interface":
                                 {
-                                    "configurable": ["enabled", "description"],
+                                    "configurable": ['name', 'type', "enabled", "description"],
                                     "informational": ["device", "url"]
                                 },
                     "ipaddress":
@@ -336,6 +371,8 @@ def pick_out_values(model, data, values):
 
     for element in list_of_models[model]["configurable"]:
         if element in values:
+            if values[element] == "":
+                continue
             #Key is added in the dictionary "config" along with a value
             config["configurable"][element] = values[element]
     
@@ -416,6 +453,7 @@ def respond():
     webhook = request.json                                                              #the variable "webhook" is created containing the incoming webhook data in a json dictionary
     model = webhook["model"]                                                            #a lookup in the dictionary is made and the data saved in a variable
     data = webhook["data"]
+    snapshots = webhook["snapshots"]
 
     print(json.dumps(webhook, indent=4))
 
@@ -431,7 +469,7 @@ def respond():
 
     #step 2: check event
     if event == "updated":
-        if webhook["snapshots"]["prechange"] == None:
+        if snapshots["prechange"] == None:
             print()
             print("prechange contains a value of null.")
             print("This occurs when the 'make this the primary IP for the device' option was changed when creating/editing an ipaddress")
@@ -439,13 +477,19 @@ def respond():
             return Response(status=200)
         
         else:
-            values = compare(webhook["snapshots"])
+            values = compare(snapshots)
 
     elif event == "created":
-        values = webhook["snapshots"]["postchange"]
+        values = snapshots["postchange"]
 
     elif event == "deleted":
-        values = webhook["snapshots"]["prechange"]
+        # when interface is deleted, netbox sends a delete webhook for the ipaddress as well, with empty post- and prechange.
+        # in this case the address is removed along with the interface on the device. No futher action is needed.
+        if snapshots["prechange"] == None:
+            return Response(status=200)
+
+        else:
+            values = snapshots["prechange"]
 
     #step 3: get configurable values and api url if more info needed  
     print(values)
@@ -474,6 +518,6 @@ def respond():
             return Response(status=200)
 
     #step 5: create and run playbook
-    run_playbook(config, ip, event, model, data, values) #device_name
+    run_playbook(config, ip, event, model, data, values, snapshots) #device_name
 
     return Response(status=200)
