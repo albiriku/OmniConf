@@ -69,28 +69,16 @@ def split_address(address, mask=False):
     else:
         return address, prefix
 
-def run_playbook(config, ip, event, model, data, values, snapshots):
+def run_playbook(config, ip, event, model, data): 
     #remove mask from ip
     host  = split_address(ip)
 
-    """
-    #removes the mask from ip
-    if ip[-2] == '/':
-        #removes the last 2 
-        ip = ip[:-2]
-    elif ip[-3] == '/':
-        #removes the last 3
-        ip = ip[:-3]
-    else:
-        #removes the last 4, if mask is 3 digits (ipv6)
-        ip = ip[:-4]
-    """
     host_list = [host] 
     # since the API is constructed for CLI it expects certain options to always be set in the context object
-    context.CLIARGS = ImmutableDict(connection='smart', module_path=['/home/albiriku/devnet/dne-dna-code/venv-flask/lib/python3.8/site-packages/ansible/modules'], forks=10, verbosity=True, check=False, diff=False)
+    context.CLIARGS = ImmutableDict(connection='smart', forks=10, verbosity=True, check=False, diff=False)
 
-    # become=None, become_method=None, become_user=None, check=False, diff=False)
-
+    #module_path=['/home/albiriku/devnet/dne-dna-code/venv-flask/lib/python3.8/site-packages/ansible/modules']
+    #/home/albiriku/exjobb/venv-flask/lib/python3.8/site-packages/ansible_collections/ansible/netcommon/plugins/modules
     """
     # required for
     # https://github.com/ansible/ansible/blob/devel/lib/ansible/inventory/manager.py#L204
@@ -145,27 +133,15 @@ def run_playbook(config, ip, event, model, data, values, snapshots):
 
     # ipaddress configuration
     if model == 'ipaddress':
+        # interface name
         name = data['assigned_object']['name']
+        # ipv4 or ipv6
         family = data['family']['label'].lower()
+        # ip address to conf
         address = config['configurable']['address']
 
-        #needed for payload format
+        #ip and mask needs to be separated for payload format
         address, prefix = split_address(address, True)
-        """
-        if address[-2] == '/':
-            #prefix is 1 digit
-            prefix = address[-1:] 
-            address = address[:-2]
-            old_address
-        elif address[-3] == '/':
-            #prefix is 2 digits
-            prefix = address[-2:]
-            address = address[:-3]
-        else:
-            #for ipv6 only, when prefix is 3 digits
-            prefix = address[-3:]
-            address = address[:-4]
-        """
 
         if family == 'ipv4':
             # only needed for IPv4, converts prefix to netmask format
@@ -179,78 +155,49 @@ def run_playbook(config, ip, event, model, data, values, snapshots):
         
         # payload & task for IPv4 & IPv6
         if event == 'created' or event == 'updated':
-            payload = { 
-                        "ietf-ip:address": [ 
-                            { 
-                            "ip": address, 
-                            mask: prefix 
-                            } 
-                        ] 
-                    }
+            
+            # payload structure same for created and updated
+            payload =   { "ietf-interfaces:interface": 
+                            { f"ietf-ip:{family}": 
+                                { "address": 
+                                    [{ 
+                                        "ip": address, 
+                                        mask: prefix 
+                                    }] 
+                                }
+                            }
+                        }
 
-            print(payload)
             if event == 'created':
-                task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', 
+                # adds the new address to the interface
+                task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', 
                         content=json.dumps(payload), method='patch')))]
      
             elif event == 'updated':
                 # the target object on the device
                 old_address = split_address(snapshots['prechange']['address'])
 
-                #first deletes the old address then adds the new
+                # first deletes the old address then adds the new
                 task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={old_address}', 
                         method='delete'))),
-                        dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address', 
+                        dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', 
                         content=json.dumps(payload), method='patch')))]
 
         elif event == 'deleted':
+            # deletes the address
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={address}', method='delete')))]
             
-        
+    if model == 'device':
+        if event == 'updated':
+            hostname = config["configurable"]["name"]
+            hostname = hostname.replace(" ", "-")
+            payload = {"Cisco-IOS-XE-native:hostname": f"{hostname}"} 
+                    
+            task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/Cisco-IOS-XE-native:native/hostname',
+                        content=json.dumps(payload), method='patch')))]
 
-        
-
-
-
-
-    ################
-    """
-    if event == 'created':
-        event = 'post'
-    elif event == 'updated':
-        event = 'patch'
-    elif event == 'deleted':
-        event = 'delete'
-
-    if model == 'interface':
-        path = '/data/ietf-interfaces:interfaces'
-        payload = 'ietf-interfaces:interface'
-        target = f'/interface={config[name]}'
-    elif model == 'device':
-        path = '/data/ietf-devices:devices'
-        payload = 'ietf-devices:device'
-        target = f'/device={config[name]}'
-    elif model == 'ipaddress':
-        path = '/data/ietf-ipaddresses:ipaddresses'
-        payload = 'ietf-ipaddresses:ipaddress'
-        target = f'/ipaddress={config[name]}'
-
-    if event == 'post':
-        task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path={path}, content=json_object, method={event})))
-    else:
-        task = dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path={path + target}, content=json_object, method={event})))
-
-    config = {payload:}
-
-    config = {"ietf-interfaces:interface":{"name": "Loopback104","description": "Added with RESTCONF v2","type": "iana-if-type:softwareLoopback","enabled": True,"ietf-ip:ipv4":{"address":[{"ip": "172.16.100.10","netmask": "255.255.255.0"}]}}}
-
-    config_put = {"ietf-interfaces:interface:":{"name": "Loopback104","description": "PUT with RESTCONF - YES", "type": "iana-if-type:softwareLoopback","type": "iana-if-type:softwareLoopback","enabled": False,"ietf-ip:ipv4":{"address":[{"ip": "172.16.100.69","netmask": "255.255.255.0"}]}}}
-
-    config_patch = {"ietf-interfaces:interface:":{"enabled": False}}
-
-    json_object = json.dumps(config, indent = 4)
-    print(json_object)
-    """
+    #appends a task to save the configuration
+    task.append(dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='restconf/operations/cisco-ia:save-config', content=None, method='post'))))
 
     # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
     # generates and runs the playbook with the task given above
@@ -333,7 +280,7 @@ list_of_models =    {
                                 },
                     "ipaddress":
                                 {
-                                    "configurable": ["address", "nat_inside", "roll"],
+                                    "configurable": ["address", "nat_inside"],
                                     "informational": ["assigned_object", "device", "url"]
                                 },
                     }
@@ -373,8 +320,14 @@ def pick_out_values(model, data, values):
         if element in values:
             if values[element] == "":
                 continue
-            #Key is added in the dictionary "config" along with a value
+            #Key is added in the dictionary config along with a value
             config["configurable"][element] = values[element]
+
+        #when primary ip is assigned to a device
+        #adds the key "name" and its value from "data" to config
+        #this is done in order to update the devices hostname when a primary ip gets assigned in netbox
+        elif "primary_ip6" in values or "primary_ip4" in values:
+            config["configurable"][element] = data[element]
     
     print('1',config)
     if config["configurable"] != {}:
@@ -413,8 +366,8 @@ def get_api_data(config):
         device_name = api_data["name"]
         return ip, device_name
     else:
-        return
-
+        return None, None
+    
 """
 def create_playbook(config, ip, device_name):
     #timestamp
@@ -439,6 +392,7 @@ def create_playbook(config, ip, device_name):
     fil.close()
     return
 """
+
 """
 Below is the flask app code that receives the webhook.
 Calls the functions responsible for each step.
@@ -448,6 +402,7 @@ HTTP response to the HTTP webhook POST. Functions and
 terms are further explained in conjunction with the functions,
 the comments beside the code only serves the purpose to explain the code as is.
 """
+
 @app.route('/webhook-test', methods=['POST'])
 def respond():
     webhook = request.json                                                              #the variable "webhook" is created containing the incoming webhook data in a json dictionary
@@ -507,7 +462,7 @@ def respond():
     #step 4: api get request for target IP address & device name (included in the webhook for device model)
     if model == "device":
         ip = config["informational"]
-        device_name = config["configurable"]
+        device_name = config["configurable"]["name"]
 
     else:
         ip, device_name = get_api_data(config)
@@ -518,6 +473,6 @@ def respond():
             return Response(status=200)
 
     #step 5: create and run playbook
-    run_playbook(config, ip, event, model, data, values, snapshots) #device_name
+    run_playbook(config, ip, event, model, data)
 
     return Response(status=200)
