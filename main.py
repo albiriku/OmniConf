@@ -18,11 +18,16 @@ from ansible.vars.manager import VariableManager
 from ansible import context
 
 # the imports needed for flask and HTTP requests
-from flask import Flask, request, Response          # used for flask app, receive and response of webhook
-import requests                                     # used for HTTP get request to netbox api
-from requests.auth import HTTPBasicAuth             # used for creating the basic authentication field in the HTTP header
+from flask import Flask, request, Response              # used for flask app, receive and response of webhook
+import requests                                         # used for HTTP get request to netbox api
+from requests.auth import HTTPBasicAuth                 # used for creating the basic authentication field in the HTTP header
 app = Flask(__name__)
 
+# IMPORTANT: YOUR user specific settings: 
+netbox_ip = 'https://193.10.237.252'                                        # ip address to netbox
+netbox_token = 'Token c788f875f6a0bce55f485051a61dbb67edba0994'             # user token to be able to communicate with netbox api
+ansible_invfile = '/home/albiriku/devnet/dne-dna-code/intro-ansible/hosts'  # path to Ansible inventory file
+ansible_vaultpass = 'secret'                                                # ansible vault password for decryption
 
 # "configurable" contains the values from the webhook we deem are configurationable for the corresponding model 
 # "informational" contains additional information required for configuration
@@ -68,6 +73,8 @@ def compare(snapshots):
 # returns the configurable values
 def pick_out_values(model, data, values):
     """
+    This function consists of 2 parts.
+
     Part 1:
     Loops through the elements in "configurable" in "list_of_models",
     then compares the elements to the elements in "values".
@@ -75,76 +82,89 @@ def pick_out_values(model, data, values):
     dict "configuration".
 
     Part 2:
-
+    Either populates "information" with a url to the device in Netbox, 
+    or a primary ip address if the model is "device". 
+    The url is needed to retrieve the primary ip address to the device
+    and the primary ip address is required in order to send the configuration.
 
     Returns "config" as a dict with both "configurable" and "informational"
     or returns a value of "None".
     """
 
+    # part 1
     # creates a new dict
     config = {}
-    # adds an empty dict to hold the configuration values
+    # adds a nestled dict to hold the configuration values
     config['configuration'] = {}
 
-    # loop comparing the elements in "configurable" and values
-    for element in list_of_models[model]["configurable"]:
-        # 
+    # loop comparing the elements in "configurable" and "values"
+    for element in list_of_models[model]['configurable']:
         if element in values:
-            # if match value is an empty string
-            if values[element] == "":
+            # if matched value is an empty string the loop continues with the next iteration
+            if values[element] == '':
                 continue
-            #Key is added in the dictionary config along with a value
-            config["configurable"][element] = values[element]
+            # key and value is added in the dictionary "configuration"
+            config['configuration'][element] = values[element]
 
-        #when primary ip is assigned to a device
-        #adds the key "name" and its value from "data" to config
-        #this is done in order to update the devices hostname when a primary ip gets assigned in netbox
-        elif "primary_ip6" in values or "primary_ip4" in values:
-            config["configurable"][element] = data[element]
-    
-    print('1',config)
-    if config["configurable"] != {}:
-        config["informational"] = {}
-        info = list_of_models[model]["informational"]
+        # in order to update the devices hostname when a primary ip gets assigned in netbox
+        # the key "name" and its value from "data" is added to the configuration dict
+        elif 'primary_ip6' in values or 'primary_ip4' in values:
+            config['configuration'][element] = data[element]
+
+    # part 2
+    # executes only if "configuration" is populated
+    if config['configuration'] != {}:
+        # creates a second dict in "config", named "information"
+        config['information'] = {}
+        # the content of "informational" is added to "info" 
+        info = list_of_models[model]['informational']
+        # the number of elements present in "info"
         length = len(info)
 
-        print('2',config)
+        for i in range(0, length):#loop på antalet element i info
+           # during the first iteration 
+            if i == 0:
+                # the first key in "information" is added
+                config['information'] = data[info[i]]
+                # if the key value is equal to "None" the function ends and returns "None"
+                if config['information'] == None:                               
+                    return None                                 
 
-        for i in range(0, length):                                      #loop på antalet element i info
-            if i == 0:                                                      #första varvet:
-                config["informational"] = data[info[i]]                           #uppslagning i data, efter element 0 från info. Sparar värdet i conf under nyckeln ["informational"]
-                if config["informational"] == None:                                 #if assigned_objects är null, tex ipaddress är inte assigned till en enhet
-                    return None                                                         #avslutar funktionen, return None
-            else:                                                           #alla andra varv:
-                config["informational"] = config["informational"][info[i]]          #uppslagning i conf["informational"], efter nästa element i info. Sparar över i conf. Upprepar för resterande element.
+            # performs iterative lookups and overwrites the value in order to perform subsequent lookups in the nestled dicts
+            # the element in "info" is matched and replaces key:value pair in "information"
+            # "information" ends up with the key corresponding the last element in "info" along with its lookup value
+            else:                                           
+                config['information'] = config['information'][info[i]]
         return config
+    # when no configuration values matched
     return None
 
 
+# performs a HTTP GET request to netbox api for the devices' primary ip address
 def get_api_data(config):
-    url = 'https://193.10.237.252' + config["informational"]
-    print(url)
+    # consist of the ip address to netbox and the url to the device
+    url = netbox_ip + config['information']
+    # HTTP header
     headers =   {
-                'Content-Type': "application/json", 
-                'Authorization': "Token c788f875f6a0bce55f485051a61dbb67edba0994" 
+                'Content-Type': 'application/json', 
+                'Authorization': netbox_token 
                 }
-
-    api_data = requests.request("GET", url, headers=headers, verify=False)
+    # performs the GET request
+    api_data = requests.request('GET', url, headers=headers, verify=False)
+    # response data as json
     api_data = api_data.json()
 
-    print(json.dumps(api_data, indent=4))
-    
-    if api_data["primary_ip"] != None:
-        ip = api_data["primary_ip"]["address"]
-        device_name = api_data["name"]
-        return ip, device_name
+    # returns the primary ip address if its present on the device
+    # otherwise returns "None"
+    if api_data['primary_ip'] != None:
+        ip = api_data['primary_ip']['address']
+        return ip
     else:
-        return None, None
+        return None
     
 
-
-#separates prefix and address from each other
-#returns both or only address depending on parameters given
+# this function separates prefix and address from each other
+# returns both or only address depending on parameters given
 def split_address(address, mask=False):
     if address[-2] == '/':
         #prefix is 1 digit
@@ -164,7 +184,8 @@ def split_address(address, mask=False):
         return address, prefix
 
 
-# Create a callback plugin so we can capture the output
+# this class is taken from the Ansible python API example: "https://docs.ansible.com/ansible/latest/dev_guide/developing_api.html"
+# create a callback plugin so we can capture the output
 class ResultsCollectorJSONCallback(CallbackBase):
     """A sample callback plugin used for performing an action as results come in.
 
@@ -196,23 +217,26 @@ class ResultsCollectorJSONCallback(CallbackBase):
         host = result._host
         self.host_failed[host.get_name()] = result
 
+# this code is also taken from "https://docs.ansible.com/ansible/latest/dev_guide/developing_api.html"
+# but it has been heavily edited
+# this function creates and runs an Ansible play
 def run_playbook(config, ip, event, model, data, snapshots):
-    # remove mask from ip
-    host  = split_address(ip)
+    # remove mask from the ip
+    host = split_address(ip)
 
-    host_list = [host]
     # since the API is constructed for CLI it expects certain options to always be set in the context object
     context.CLIARGS = ImmutableDict(connection='smart', forks=10, verbosity=True, check=False, diff=False)
 
     # initialize needed objects
     loader = DataLoader() # takes care of finding and reading yaml, json and ini files
-    passwords = dict(vault_pass='secret')
+    passwords = dict(vault_pass=ansible_vaultpass)
 
     # instantiate our ResultsCollectorJSONCallback for handling results as they come in. Ansible expects this to be one of its main display outlets
     results_callback = ResultsCollectorJSONCallback()
 
     # create inventory, use path to host config file as source or hosts in a comma separated string
-    inventory = InventoryManager(loader=loader, sources='/home/albiriku/devnet/dne-dna-code/intro-ansible/hosts') #sources
+    # IMPORTANT
+    inventory = InventoryManager(loader=loader, sources=ansible_invfile)
 
     # variable manager takes care of merging all the different sources to give you a unified view of variables available in each context
     variable_manager = VariableManager(loader=loader, inventory=inventory)
@@ -232,18 +256,18 @@ def run_playbook(config, ip, event, model, data, snapshots):
     # interface configuration
     if model == 'interface':
         name = data['name']
-        if "type" in config['configurable']:
-            if config['configurable']['type'] == 'virtual':
-                config['configurable']['type'] = 'softwareLoopback'
+        if 'type' in config['configuration']:
+            if config['configuration']['type'] == 'virtual':
+                config['configuration']['type'] = 'softwareLoopback'
             else:
-                config['configurable']['type'] = 'ethernetCsmacd'
+                config['configuration']['type'] = 'ethernetCsmacd'
 
         if event == 'created':
-            payload = {"ietf-interfaces:interface":config['configurable']}
+            payload = {"ietf-interfaces:interface":config['configuration']}
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json.dumps(payload), method='post')))]
 
         elif event == 'updated':
-            payload = {"ietf-interfaces:interface:":config['configurable']}
+            payload = {"ietf-interfaces:interface:":config['configuration']}
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))]
 
         elif event == 'deleted':
@@ -256,7 +280,7 @@ def run_playbook(config, ip, event, model, data, snapshots):
         # ipv4 or ipv6
         family = data['family']['label'].lower()
         # ip address to conf
-        address = config['configurable']['address']
+        address = config['configuration']['address']
 
         #ip and mask needs to be separated for payload format
         address, prefix = split_address(address, True)
@@ -275,11 +299,11 @@ def run_playbook(config, ip, event, model, data, snapshots):
         if event == 'created' or event == 'updated':
 
             # payload structure same for created and updated
-            payload =   { "ietf-interfaces:interface":
-                            { f"ietf-ip:{family}":
-                                { "address":
+            payload =   { 'ietf-interfaces:interface':
+                            { f'ietf-ip:{family}':
+                                { 'address':
                                     [{
-                                        "ip": address,
+                                        'ip': address,
                                         mask: prefix
                                     }]
                                 }
@@ -307,9 +331,9 @@ def run_playbook(config, ip, event, model, data, snapshots):
 
     if model == 'device':
         if event == 'updated':
-            hostname = config["configurable"]["name"]
+            hostname = config['configuration']['name']
             hostname = hostname.replace(" ", "-")
-            payload = {"Cisco-IOS-XE-native:hostname": f"{hostname}"}
+            payload = {'Cisco-IOS-XE-native:hostname': f'{hostname}'}
 
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/Cisco-IOS-XE-native:native/hostname',
                         content=json.dumps(payload), method='patch')))]
@@ -317,8 +341,8 @@ def run_playbook(config, ip, event, model, data, snapshots):
     # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
     # generates and runs the playbook with the task given above
     play_source = dict(
-    name="Ansible Play",
-    hosts=host_list,
+    name='Ansible Play',
+    hosts=[host],
     gather_facts='no',
     tasks=task
     )
@@ -340,7 +364,7 @@ def run_playbook(config, ip, event, model, data, snapshots):
     shutil.rmtree(C.DEFAULT_LOCAL_TMP, True)
 
     # Prints the outcome of playbook that executed
-    print("UP ***********")
+    print('UP ***********')
     for host, result in results_callback.host_ok.items():
         #if result._result['candidate'] == None:
         if not 'candidate' in result._result:
@@ -348,11 +372,11 @@ def run_playbook(config, ip, event, model, data, snapshots):
         else:
             print('{0} >>> {1}'.format(host, result._result['candidate']))
 
-    print("FAILED *******")
+    print('FAILED *******')
     for host, result in results_callback.host_failed.items():
         print('{0} >>> {1}'.format(host, result._result['msg']))
 
-    print("DOWN *********")
+    print('DOWN *********')
     for host, result in results_callback.host_unreachable.items():
         print('{0} >>> {1}'.format(host, result._result['msg']))
 
@@ -395,70 +419,69 @@ the comments beside the code only serves the purpose to explain the code as is.
 @app.route('/webhook-test', methods=['POST'])
 def respond():
     webhook = request.json                                                              #the variable "webhook" is created containing the incoming webhook data in a json dictionary
-    model = webhook["model"]                                                            #a lookup in the dictionary is made and the data saved in a variable
-    data = webhook["data"]
-    snapshots = webhook["snapshots"]
+    model = webhook['model']                                                            #a lookup in the dictionary is made and the data saved in a variable
+    data = webhook['data']
+    snapshots = webhook['snapshots']
 
     print(json.dumps(webhook, indent=4))
 
     #step 1: check if model is configurable
     if check_model(model) == True:
-        event = webhook["event"]
+        event = webhook['event']
 
     #if model is not configurable
     else:
         #log and stop
-        print("det funka inte")
+        print('det funka inte')
         return Response(status=200)
 
     #step 2: check event
-    if event == "updated":
-        if snapshots["prechange"] == None:
+    if event == 'updated':
+        if snapshots['prechange'] == None:
             print()
-            print("prechange contains a value of null.")
-            print("This occurs when the 'make this the primary IP for the device' option was changed when creating/editing an ipaddress")
-            print("which will send a device webhook as well, with the prechange set to null")
+            print('Prechange contains a value of null.')
+            print('This occurs when the "make this the primary IP for the device" option was changed when creating/editing an ipaddress')
+            print('which will send a device webhook as well, with the prechange set to null')
             return Response(status=200)
         
         else:
             values = compare(snapshots)
 
-    elif event == "created":
-        values = snapshots["postchange"]
+    elif event == 'created':
+        values = snapshots['postchange']
 
-    elif event == "deleted":
+    elif event == 'deleted':
         # when interface is deleted, netbox sends a delete webhook for the ipaddress as well, with empty post- and prechange.
         # in this case the address is removed along with the interface on the device. No futher action is needed.
-        if snapshots["prechange"] == None:
+        if snapshots['prechange'] == None:
             return Response(status=200)
 
         else:
-            values = snapshots["prechange"]
+            values = snapshots['prechange']
 
     #step 3: get configurable values and api url if more info needed  
     print(values)
     config = pick_out_values(model, data, values)
-    print("slutresultat: ", config)
+    print('slutresultat: ', config)
 
     if config == None:
         print()
-        print("config == None. No configurable values were returned from the 'pick_out_values' function,")
-        print("device has no primary IP assigned to it, or")
-        print("assigned_objects contains a value of null. This occurs when a webhook is triggered for an ipaddress which has not been assigned to a device")
-        print("no configuration needed, because the change doesnt relate to a device.")
+        print('config == None. No configurable values were returned from the "pick_out_values" function,')
+        print('device has no primary IP assigned to it, or')
+        print('assigned_objects contains a value of null. This occurs when a webhook is triggered for an ipaddress which has not been assigned to a device')
+        print('no configuration needed, because the change doesnt relate to a device.')
         return Response(status=200)
 
     #step 4: api get request for target IP address & device name (included in the webhook for device model)
-    if model == "device":
-        ip = config["informational"]
-        device_name = config["configurable"]["name"]
+    if model == 'device':
+        ip = config['information']
 
     else:
-        ip, device_name = get_api_data(config)
-        print("device primary IP is", ip)
+        ip = get_api_data(config)
+        print('device primary IP is', ip)
         if ip == None:
             print()
-            print("The targeted device has no primary IP assigned. Nowhere to send conf.")
+            print('The targeted device has no primary IP assigned. Nowhere to send conf.')
             return Response(status=200)
 
     #step 5: create and run playbook
