@@ -23,11 +23,12 @@ import requests                                         # used for HTTP get requ
 from requests.auth import HTTPBasicAuth                 # used for creating the basic authentication field in the HTTP header
 app = Flask(__name__)
 
-# IMPORTANT: YOUR user specific settings: 
-netbox_ip = 'https://193.10.237.252'                                        # ip address to netbox
-netbox_token = 'Token c788f875f6a0bce55f485051a61dbb67edba0994'             # user token to be able to communicate with netbox api
-ansible_invfile = '/home/albiriku/devnet/dne-dna-code/intro-ansible/hosts'  # path to Ansible inventory file
-ansible_vaultpass = 'secret'                                                # ansible vault password for decryption
+# IMPORTANT: YOUR user specific settings:
+FLASK_PATH = '/webhook-test'                                                # the path that flask listens to for webhooks, which should also be appended to url webhook destination
+NETBOX_IP = 'https://193.10.237.252'                                        # ip address to netbox
+NETBOX_TOKEN = 'Token c788f875f6a0bce55f485051a61dbb67edba0994'             # user token to be able to communicate with netbox api
+ANSIBLE_INVFILE = '/home/albiriku/devnet/dne-dna-code/intro-ansible/hosts'  # path to Ansible inventory file
+ANSIBLE_VAULTPASS = 'secret'                                                # ansible vault password for decryption
 
 # "configurable" contains the values from the webhook we deem are configurationable for the corresponding model 
 # "informational" contains additional information required for configuration
@@ -143,11 +144,11 @@ def pick_out_values(model, data, values):
 # performs a HTTP GET request to netbox api for the devices' primary ip address
 def get_api_data(config):
     # consist of the ip address to netbox and the url to the device
-    url = netbox_ip + config['information']
+    url = NETBOX_IP + config['information']
     # HTTP header
     headers =   {
                 'Content-Type': 'application/json', 
-                'Authorization': netbox_token 
+                'Authorization': NETBOX_TOKEN 
                 }
     # performs the GET request
     api_data = requests.request('GET', url, headers=headers, verify=False)
@@ -221,7 +222,30 @@ class ResultsCollectorJSONCallback(CallbackBase):
 # but it has been heavily edited
 # this function creates and runs an Ansible play
 def run_playbook(config, ip, event, model, data, snapshots):
-    # remove mask from the ip
+    """
+    Part 1:
+    Apart from "host" this part consist of the orignal code,
+    although some parameters have been changed as well.
+    Initializes and loads necessary data for Ansible to operate.
+
+    Part 2:
+    Creates the data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
+    The Ansible restconf_config module is used for each play (task), which yang data model used might differ between the plays.
+    The task and payload is defined using prior extrapolated data where the task that will be performed by the device is decided by the event,
+    i.e. a "deleted" event will result in a "delete" task being executed. Appropriate parameters for the event are also specified in the task,
+    such as "path" or "method". The payload consists of the appropriate yang-data-model used and the configuration dict.
+
+    Part 3: 
+    Compiles and executes the Ansible playbook and reports back the result.
+
+    Part 4:
+    Saves the configuration on the device to startup-config.
+    This doesnt seem to be doable with the ansible restconf plugin using the cisco-ia module, 
+    so we use requests to send a HTTP post msg instead of executing it as a playbook.
+    """
+
+    # part 1
+    # removes mask from the ip
     host = split_address(ip)
 
     # since the API is constructed for CLI it expects certain options to always be set in the context object
@@ -229,14 +253,13 @@ def run_playbook(config, ip, event, model, data, snapshots):
 
     # initialize needed objects
     loader = DataLoader() # takes care of finding and reading yaml, json and ini files
-    passwords = dict(vault_pass=ansible_vaultpass)
+    passwords = dict(vault_pass=ANSIBLE_VAULTPASS)
 
     # instantiate our ResultsCollectorJSONCallback for handling results as they come in. Ansible expects this to be one of its main display outlets
     results_callback = ResultsCollectorJSONCallback()
 
     # create inventory, use path to host config file as source or hosts in a comma separated string
-    # IMPORTANT
-    inventory = InventoryManager(loader=loader, sources=ansible_invfile)
+    inventory = InventoryManager(loader=loader, sources=ANSIBLE_INVFILE)
 
     # variable manager takes care of merging all the different sources to give you a unified view of variables available in each context
     variable_manager = VariableManager(loader=loader, inventory=inventory)
@@ -251,44 +274,57 @@ def run_playbook(config, ip, event, model, data, snapshots):
         passwords=passwords,
         stdout_callback=results_callback,  # use our custom callback instead of the ``default`` callback plugin, which prints to stdout
     )
-    
-    # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
+
+    # part 2
     # interface configuration
+    # uses the ietf-yang-data-model interfaces-module
     if model == 'interface':
+        # name of the target interface 
+        # used in the path when altering an existing interface
         name = data['name']
+        # first checks if 'type' exist in conf, then converts the interface type
+        # from a netbox value to a value supported by the ietf-interface module 
         if 'type' in config['configuration']:
+            # "virtual" gets converted to "softwareLoopback"
             if config['configuration']['type'] == 'virtual':
                 config['configuration']['type'] = 'softwareLoopback'
+            # other types gets converted to "ethernetCsmacd"
             else:
                 config['configuration']['type'] = 'ethernetCsmacd'
 
+        # when interface is created in netbox
         if event == 'created':
+            # "configuration" dict as payload
             payload = {"ietf-interfaces:interface":config['configuration']}
+            # this task will create the interface on the device
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/ietf-interfaces:interfaces', content=json.dumps(payload), method='post')))]
 
+        # when interface is edited in netbox
         elif event == 'updated':
             payload = {"ietf-interfaces:interface:":config['configuration']}
+            # updates the interface on the device
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', content=json.dumps(payload), method='patch')))]
 
+        # when interface is deleted in netbox
         elif event == 'deleted':
+            # deletes the interface on the device
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}', method='delete')))]
 
     # ipaddress configuration
     if model == 'ipaddress':
-        # interface name
+        # the target interface
         name = data['assigned_object']['name']
         # ipv4 or ipv6
         family = data['family']['label'].lower()
         # ip address to conf
         address = config['configuration']['address']
 
-        #ip and mask needs to be separated for payload format
+        # ip and mask needs to be separated for the payload format
         address, prefix = split_address(address, True)
 
+        # only needed for IPv4, converts prefix to netmask format
         if family == 'ipv4':
-            # only needed for IPv4, converts prefix to netmask format
-            # reference:
-            # https://stackoverflow.com/questions/23352028/how-to-convert-a-cidr-prefix-to-a-dotted-quad-netmask-in-python
+            # reference: https://stackoverflow.com/questions/23352028/how-to-convert-a-cidr-prefix-to-a-dotted-quad-netmask-in-python
             prefix = '.'.join([str((m>>(3-i)*8)&0xff) for i,m in enumerate([-1<<(32-int(prefix))]*4)])
             mask = 'netmask'
 
@@ -319,7 +355,7 @@ def run_playbook(config, ip, event, model, data, snapshots):
                 # the target object on the device
                 old_address = split_address(snapshots['prechange']['address'])
 
-                # first deletes the old address then adds the new
+                # first deletes the old address then adds the new address
                 task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={old_address}',
                         method='delete'))),
                         dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}',
@@ -329,16 +365,22 @@ def run_playbook(config, ip, event, model, data, snapshots):
             # deletes the address
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={address}', method='delete')))]
 
+    # device configuration (hostname only)
+    # uses the Cisco IOS XE native yang data model
     if model == 'device':
+        # during device creation in netbox no primary ip address is associated with the device
+        # therefore hostname can only be configured on the physical device via an update
+        # hostname will be updated on the device when a primary ip gets assigned as well
         if event == 'updated':
             hostname = config['configuration']['name']
+            # blank space not supported as a part of the devices' hostname
             hostname = hostname.replace(" ", "-")
             payload = {'Cisco-IOS-XE-native:hostname': f'{hostname}'}
 
             task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path='/data/Cisco-IOS-XE-native:native/hostname',
                         content=json.dumps(payload), method='patch')))]
 
-    # create data structure that represents our play, including tasks, this is basically what our YAML loader does internally.
+    # part 3
     # generates and runs the playbook with the task given above
     play_source = dict(
     name='Ansible Play',
@@ -364,27 +406,27 @@ def run_playbook(config, ip, event, model, data, snapshots):
     shutil.rmtree(C.DEFAULT_LOCAL_TMP, True)
 
     # Prints the outcome of playbook that executed
-    print('UP ***********')
+    print('SUCCESSFUL ***********')
     for host, result in results_callback.host_ok.items():
-        #if result._result['candidate'] == None:
+        # when a playbook performs delete
         if not 'candidate' in result._result:
             print('{0} >>> {1} \n{2}'.format(host, result._result['changed'], result._result['invocation']))
+        # when a playbook performs create/update
         else:
             print('{0} >>> {1}'.format(host, result._result['candidate']))
 
     print('FAILED *******')
+    # failed to execute the play
     for host, result in results_callback.host_failed.items():
         print('{0} >>> {1}'.format(host, result._result['msg']))
 
-    print('DOWN *********')
+    print('UNREACHABLE *********')
+    # couldnt reach the host
     for host, result in results_callback.host_unreachable.items():
         print('{0} >>> {1}'.format(host, result._result['msg']))
 
-
-    # Saves the configuration on the device:
-    # we couldnt get cisco-ia module to work with the ansible restconf plugin
-    # so we use requests to send an HTTP post msg instead of executing a playbook
-
+    # part 4
+    # saves the configuration on the device
     # loaded_vars contains all the host variables that ansible loads from the varfiles
     loaded_vars = variable_manager._hostvars
     # restconf username loaded from ansible
@@ -406,36 +448,51 @@ def run_playbook(config, ip, event, model, data, snapshots):
     print(json.dumps(saveconf, indent=4))
 
 
-"""
-Below is the flask app code that receives the webhook.
-Calls the functions responsible for each step.
-If a function returns a value of None, the webhook wont be processed futher.
-In the code this is represented as a "return Response(=200)", which is a
-HTTP response to the HTTP webhook POST. Functions and
-terms are further explained in conjunction with the functions,
-the comments beside the code only serves the purpose to explain the code as is.
-"""
-
-@app.route('/webhook-test', methods=['POST'])
+# the parameters which flask listens to for webhooks
+@app.route(FLASK_PATH, methods=['POST'])
 def respond():
-    webhook = request.json                                                              #the variable "webhook" is created containing the incoming webhook data in a json dictionary
-    model = webhook['model']                                                            #a lookup in the dictionary is made and the data saved in a variable
+    """
+    This functions runs when receiving a webhook.
+    Below is the flask app code that receives the webhook.
+    Calls the functions responsible for each step.
+    If a function returns a value of None, the webhook wont be processed futher.
+    In the code this is represented as a "return Response(=200)", which is a 
+    HTTP response to the HTTP webhook POST. 
+    Functions and terms are further explained in conjunction with the functions
+    
+    First of all the received webhook is stored in a variable and
+    some of its' important parts are stored in other variables.
+    These variables are used in different functions to extract data.
+
+    Step 1 calls the function "check_model" which uses the "model"
+    part of the webhook in order to check if the model is configurable.
+    This is arbitrarily predetermined in the dict "list_of_models".
+    If model is determined to be configurable the "event" value of the webhook
+    is saved to be processed in step 2. Undetermined configurability will end the process.
+
+    Step 2 calls the function ""
+    """
+
+    # the webhook payload is stored in "webhook"
+    webhook = request.json
+    # the model which the webhook originated from
+    model = webhook['model']
+    # the data portion of the webhook
     data = webhook['data']
+    # post- and prechange information    
     snapshots = webhook['snapshots']
 
-    print(json.dumps(webhook, indent=4))
-
-    #step 1: check if model is configurable
+    # step 1: check if model is configurable
     if check_model(model) == True:
         event = webhook['event']
 
-    #if model is not configurable
+    # if model is not configurable
     else:
-        #log and stop
-        print('det funka inte')
+        # ends
+        print('model not configurable')
         return Response(status=200)
 
-    #step 2: check event
+    # step 2: check event
     if event == 'updated':
         if snapshots['prechange'] == None:
             print()
