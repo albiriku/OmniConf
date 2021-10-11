@@ -1,3 +1,21 @@
+    """
+    OmniConf - used with Netbox and Ansible to automate certain device configuration using restconf
+    Copyright (C) 2021, Alexander Birgersson & Rickard Kutsomihas.
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+    """
+
 #!/usr/bin/env python
 
 # the imports are needed for Ansible API (to run playbooks)
@@ -60,9 +78,7 @@ def check_model(model):
 
 # used when event is "updated"
 # returns the difference of "prechange" vs "postchange" in a new dict
-def compare(snapshots):
-    prechange = snapshots['prechange']
-    postchange = snapshots['postchange']
+def compare(prechange, postchange):
     updated_values = {}
     # loops through keys and non-matching values
     for key in prechange:
@@ -221,7 +237,7 @@ class ResultsCollectorJSONCallback(CallbackBase):
 # this code is also taken from "https://docs.ansible.com/ansible/latest/dev_guide/developing_api.html"
 # but it has been heavily edited
 # this function creates and runs an Ansible play
-def run_playbook(config, ip, event, model, data, snapshots):
+def run_playbook(config, ip, event, model, data, prechange):
     """
     Part 1:
     Apart from "host" this part consist of the orignal code,
@@ -353,7 +369,7 @@ def run_playbook(config, ip, event, model, data, snapshots):
 
             elif event == 'updated':
                 # the target object on the device
-                old_address = split_address(snapshots['prechange']['address'])
+                old_address = split_address(prechange['address'])
 
                 # first deletes the old address then adds the new address
                 task = [dict(action=dict(module='ansible.netcommon.restconf_config', args=dict(path=f'/data/ietf-interfaces:interfaces/interface={name}/ietf-ip:{family}/address={old_address}',
@@ -470,7 +486,22 @@ def respond():
     If model is determined to be configurable the "event" value of the webhook
     is saved to be processed in step 2. Undetermined configurability will end the process.
 
-    Step 2 calls the function ""
+    Step 2 compares the different events in the webhook. If event is "updated" then the function "compare()"
+    is called, which compares the "prechange" part of the webhook with the "postchange" part.
+    The differences between the pre- and postchange are saved in the "values" variable.
+    If the event is "created" the "postchange" is saved in "values".
+    If the event is "deleted" the "prechange" is saved in "values".
+
+    Step 3 configurable values are selected by calling the "pick_out_values()" function with the arguments
+    "data", "model" and "values". The function will also return a url to a device in Netbox when "model" is not "device".
+    If no configurable values can be selected, the process end.
+
+    Step 4 depending on what model is being configured the retrieval of ip address differ. If the model is "device" the 
+    address is included in the webhook, otherwise the url to the device has to be used and then via Netbox API retrieve the 
+    address from the device. If the device doesnt have a primary ip address assigned to it, the process will end.
+
+    Step 5 is the last step. Calls the "run_playbook()" function in order to create and run an Ansible playbook with data from previous steps.
+    The configuration will be saved on the device. The function only offers full support for Cisco IOS XE devices. For other devices support might vary.
     """
 
     # the webhook payload is stored in "webhook"
@@ -480,7 +511,10 @@ def respond():
     # the data portion of the webhook
     data = webhook['data']
     # post- and prechange information    
-    snapshots = webhook['snapshots']
+    prechange = webhook['snapshots']['prechange']
+    postchange = webhook['snapshots']['postchange']
+
+    print(json.dumps(webhook, indent = 4))
 
     # step 1: check if model is configurable
     if check_model(model) == True:
@@ -494,42 +528,40 @@ def respond():
 
     # step 2: check event
     if event == 'updated':
-        if snapshots['prechange'] == None:
-            print()
-            print('Prechange contains a value of null.')
-            print('This occurs when the "make this the primary IP for the device" option was changed when creating/editing an ipaddress')
-            print('which will send a device webhook as well, with the prechange set to null')
+        if prechange == None:
+            # when prechange contains a value of null
+            # this occurs when the "make this the primary IP for the device" option was changed when creating/editing an ipaddress
+            # which will send a device webhook as well, with the prechange set to null
             return Response(status=200)
         
         else:
-            values = compare(snapshots)
+            values = compare(prechange, postchange)
 
     elif event == 'created':
-        values = snapshots['postchange']
+        values = postchange
 
     elif event == 'deleted':
-        # when interface is deleted, netbox sends a delete webhook for the ipaddress as well, with empty post- and prechange.
-        # in this case the address is removed along with the interface on the device. No futher action is needed.
-        if snapshots['prechange'] == None:
+        if prechange == None:
+            # when interface is deleted, netbox sends a delete webhook for the ipaddress as well, with empty post- and prechange.
+            # in this case the address will be removed along with the interface on the device, which mean no futher action is needed.
             return Response(status=200)
 
         else:
-            values = snapshots['prechange']
+            values = prechange
 
     #step 3: get configurable values and api url if more info needed  
-    print(values)
     config = pick_out_values(model, data, values)
-    print('slutresultat: ', config)
+    print('Configurable values: ', config)
 
     if config == None:
-        print()
-        print('config == None. No configurable values were returned from the "pick_out_values" function,')
-        print('device has no primary IP assigned to it, or')
-        print('assigned_objects contains a value of null. This occurs when a webhook is triggered for an ipaddress which has not been assigned to a device')
-        print('no configuration needed, because the change doesnt relate to a device.')
+        # no configurable values were returned from the "pick_out_values" function
+        # this can also happen when:
+        # 1. the device has no primary IP assigned to it, or
+        # 2. a webhook is triggered for an ipaddress which has not been assigned to a device, assigned_objects contains a value of null
+        # in this case no configuration has been made, because the change doesnt relate to a device
         return Response(status=200)
 
-    #step 4: api get request for target IP address & device name (included in the webhook for device model)
+    #step 4: api get request to retrive device primary IP address (included in the webhook for device model)
     if model == 'device':
         ip = config['information']
 
@@ -542,6 +574,6 @@ def respond():
             return Response(status=200)
 
     #step 5: create and run playbook
-    run_playbook(config, ip, event, model, data, snapshots)
+    run_playbook(config, ip, event, model, data, prechange)
 
     return Response(status=200)
