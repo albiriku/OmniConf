@@ -125,16 +125,17 @@ For example you might want to add or remove parameters in the "list_of_models" v
 TESTED ON:
 
 Server:
-Ubuntu server 20.04.3 LTS
+* Ubuntu server 20.04.3 LTS
 Specs:
-2 CPU
-4 GB RAM
-25 GB HDD
+* 2 CPU
+* 4 GB RAM
+* 25 GB HDD
 
-Python v. 3.8.10
-Netbox v. 2.11.7
-Ansible v. 4.5.0
-ansible.netcommon 2.4.0
-Requests v. 2.26.0
-Flask v. 2.0.1
+Software:
+* Python v. 3.8.10
+* Netbox v. 2.11.7
+* Ansible v. 4.5.0
+    * ansible.netcommon 2.4.0
+* Requests v. 2.26.0
+* Flask v. 2.0.1
 
