@@ -102,8 +102,8 @@ SCRIPT FUNCTIONS:
 
 The script will send configure via Restconf to the device with according to the following changes:
 
-* changing the name of a device in Netbox will changes the hostname of the device.
-* creating, updating, deleting an interface in Netbox will create, update, delete the interface configuration of the device.
+* changing the name of a device in Netbox will change the hostname of the device.
+* creating, updating, deleting an interface in Netbox will create, update, delete an interface configuration of the device.
 * enable/disable interface in Netbox will enable/disable the interface on the device.
 * assigning/removing an interface´s IP-address in Netbox will assig/remove an interface´s IP-address on the device.
 * the configuration is automatically saved to startup on the device after each call.
