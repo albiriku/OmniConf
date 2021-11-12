@@ -1,4 +1,4 @@
-    """
+"""
     OmniConf - used with Netbox and Ansible to automate certain device configuration using restconf
     Copyright (C) 2021, Alexander Birgersson & Rickard Kutsomihas.
 
@@ -14,7 +14,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
-    """
+"""
 
 #!/usr/bin/env python
 
