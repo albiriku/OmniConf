@@ -11,7 +11,7 @@ Specs:
 4 GB RAM
 25 GB HDD
 
-* Netbox, Ansible and the Script can run on the same system if desired.
+* Netbox, Ansible and the FlaksApp script can run on the same system if desired.
 
 PREREQUISITES
 
