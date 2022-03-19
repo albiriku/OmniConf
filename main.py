@@ -43,7 +43,7 @@ app = Flask(__name__)
 
 # IMPORTANT: YOUR user specific settings:
 FLASK_PATH = '/webhook-test'                                                # the path that flask listens to for webhooks, which should also be appended to url webhook destination
-NETBOX_IP = 'https://193.10.237.252'                                        # ip address to netbox
+NETBOX_IP = 'https://X.X.X.X'                                               # ip address to netbox
 NETBOX_TOKEN = 'Token c788f875f6a0bce55f485051a61dbb67edba0994'             # user token to be able to communicate with netbox api
 ANSIBLE_INVFILE = '/home/albiriku/devnet/dne-dna-code/intro-ansible/hosts'  # path to Ansible inventory file
 ANSIBLE_VAULTPASS = 'secret'                                                # ansible vault password for decryption
